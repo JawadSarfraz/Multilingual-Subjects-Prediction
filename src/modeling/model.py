@@ -46,12 +46,24 @@ class SubjectPredictor:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.max_length = max_length
         self.model = None
-        self.label_binarizer = MultiLabelBinarizer()
+        self.label_binarizer = None
         
+    def _fit_label_binarizer(self, all_subjects: List[List[str]]) -> None:
+        """Fit the label binarizer on all possible subjects."""
+        if self.label_binarizer is None:
+            self.label_binarizer = MultiLabelBinarizer()
+            # Get unique subjects
+            unique_subjects = set()
+            for subjects in all_subjects:
+                unique_subjects.update(subjects)
+            # Fit on all possible subjects
+            self.label_binarizer.fit([unique_subjects])
+    
     def prepare_features(
         self,
         texts: List[str],
-        labels: List[List[str]] = None
+        labels: List[List[str]] = None,
+        all_subjects: List[List[str]] = None
     ) -> Dict[str, Union[torch.Tensor, np.ndarray]]:
         # Tokenize texts
         features = self.tokenizer(
@@ -66,11 +78,14 @@ class SubjectPredictor:
         features = {k: v.to(self.device) for k, v in features.items()}
         
         if labels is not None:
-            # Fit and transform labels if not fitted
-            if not hasattr(self.label_binarizer, 'classes_'):
-                y = self.label_binarizer.fit_transform(labels)
-            else:
-                y = self.label_binarizer.transform(labels)
+            # Fit label binarizer if not fitted
+            if all_subjects is not None:
+                self._fit_label_binarizer(all_subjects)
+            elif self.label_binarizer is None:
+                self._fit_label_binarizer([labels])
+            
+            # Transform labels
+            y = self.label_binarizer.transform(labels)
             features['labels'] = torch.FloatTensor(y).to(self.device)
         
         return features
@@ -146,7 +161,7 @@ class SubjectPredictor:
             'model_state_dict': self.model.state_dict(),
             'tokenizer_name': self.tokenizer.name_or_path,
             'max_length': self.max_length,
-            'label_classes': self.label_binarizer.classes_
+            'label_classes': self.label_binarizer.classes_ if self.label_binarizer else None
         }, path)
     
     def load_model(self, path: str) -> None:
@@ -154,7 +169,9 @@ class SubjectPredictor:
         checkpoint = torch.load(path, map_location=self.device)
         
         # Initialize label binarizer with saved classes
-        self.label_binarizer.fit([checkpoint['label_classes']])
+        if checkpoint['label_classes'] is not None:
+            self.label_binarizer = MultiLabelBinarizer()
+            self.label_binarizer.fit([checkpoint['label_classes']])
         
         # Create and load model
         self.create_model(len(checkpoint['label_classes']))

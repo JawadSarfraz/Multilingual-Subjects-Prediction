@@ -9,15 +9,16 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 from model import SubjectPredictor
 
 class AbstractDataset(Dataset):
-    def __init__(self, texts: List[str], subjects: List[List[str]]):
+    def __init__(self, texts: List[str], subjects: List[List[str]], all_subjects: List[List[str]]):
         self.texts = texts
         self.subjects = subjects
+        self.all_subjects = all_subjects
     
     def __len__(self) -> int:
         return len(self.texts)
     
-    def __getitem__(self, idx: int) -> Tuple[str, List[str]]:
-        return self.texts[idx], self.subjects[idx]
+    def __getitem__(self, idx: int) -> Tuple[str, List[str], List[List[str]]]:
+        return self.texts[idx], self.subjects[idx], self.all_subjects
 
 class Trainer:
     def __init__(
@@ -43,9 +44,10 @@ class Trainer:
         self,
         texts: List[str],
         subjects: List[List[str]],
+        all_subjects: List[List[str]],
         shuffle: bool = True
     ) -> DataLoader:
-        dataset = AbstractDataset(texts, subjects)
+        dataset = AbstractDataset(texts, subjects, all_subjects)
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
@@ -53,9 +55,13 @@ class Trainer:
             collate_fn=self._collate_fn
         )
     
-    def _collate_fn(self, batch: List[Tuple[str, List[str]]]) -> Dict:
-        texts, subjects = zip(*batch)
-        return self.predictor.prepare_features(list(texts), list(subjects))
+    def _collate_fn(self, batch: List[Tuple[str, List[str], List[List[str]]]]) -> Dict:
+        texts, subjects, all_subjects = zip(*batch)
+        return self.predictor.prepare_features(
+            list(texts),
+            list(subjects),
+            all_subjects[0]  # All batches have the same all_subjects
+        )
     
     def _compute_metrics(
         self,
@@ -84,11 +90,17 @@ class Trainer:
             'val_metrics': []
         }
         
-        # Create model
-        unique_subjects = set()
+        # Get all unique subjects for label binarization
+        all_subjects = []
         for subjects in train_data['subjects']:
-            unique_subjects.update(subjects)
+            all_subjects.extend(subjects)
+        for subjects in val_data['subjects']:
+            all_subjects.extend(subjects)
+        
+        # Create model with correct number of labels
+        unique_subjects = set(all_subjects)
         num_labels = len(unique_subjects)
+        print(f"Number of unique subjects: {num_labels}")
         self.predictor.create_model(num_labels)
         
         # Create optimizer
@@ -100,11 +112,13 @@ class Trainer:
         # Create dataloaders
         train_dataloader = self._create_dataloader(
             train_data['abstract'],
-            train_data['subjects']
+            train_data['subjects'],
+            [all_subjects]  # Pass as list of lists
         )
         val_dataloader = self._create_dataloader(
             val_data['abstract'],
             val_data['subjects'],
+            [all_subjects],  # Pass as list of lists
             shuffle=False
         )
         
@@ -165,6 +179,7 @@ class Trainer:
     def evaluate_model(
         self,
         test_data: Dict,
+        all_subjects: List[str],
         model_path: str = None
     ) -> Tuple[float, Dict[str, float]]:
         # Load best model if path provided
@@ -175,6 +190,7 @@ class Trainer:
         test_dataloader = self._create_dataloader(
             test_data['abstract'],
             test_data['subjects'],
+            [all_subjects],  # Pass as list of lists
             shuffle=False
         )
         
@@ -214,8 +230,16 @@ if __name__ == "__main__":
     val_data = load_data(os.path.join(data_dir, "val.json"))
     test_data = load_data(os.path.join(data_dir, "test.json"))
     
+    # Get all unique subjects
+    all_subjects = []
+    for data in [train_data, val_data, test_data]:
+        for subjects in data['subjects']:
+            all_subjects.extend(subjects)
+    all_subjects = list(set(all_subjects))
+    print(f"Total unique subjects: {len(all_subjects)}")
+    
     # Initialize trainer
-    trainer = Trainer()
+    trainer = Trainer(batch_size=4)  # Reduced batch size to handle large number of labels
     
     # Train model
     print("Starting training...")
@@ -225,6 +249,7 @@ if __name__ == "__main__":
     print("\nEvaluating on test set...")
     test_loss, test_metrics = trainer.evaluate_model(
         test_data,
+        all_subjects,
         os.path.join(trainer.model_dir, "subject_classifier_best.pt")
     )
     
